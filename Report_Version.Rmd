@@ -1,0 +1,443 @@
+---
+title: 'Credit Card Default Analysis'
+subtitle: 'MDML 2047 Final Project'
+author: Ruoyu Zhu (rz1403)
+output:
+  pdf_document: 
+    latex_engine: xelatex
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r, include=FALSE}
+library(memisc)
+library(foreign)
+library(doParallel)
+library(foreach)
+library(proj4)
+library(randomForest)
+library(tidyverse)
+library(lubridate)
+library(ROCR)
+library(rvest)
+library(dplyr)
+library(olsrr)
+library(class)
+library(glmnet)
+```
+## Introduction 
+
+Every year, credit scoring methodologies evaluate the risk in billions of dollars in loans. And the accuracy of the evaluation determines the profit or loss of a financial institution. Because of that, advanced machine learning methods are quickly finding applications throughout the financial services industry and achieved great predictive successes. Credit card department, which generates profit from the interest rate, is highly relying on the result of machine learning model when making lending decision. 
+
+
+## Data Selection and Data Description
+
+**Data Selection**
+
+Due to legal issues and privacy reasons, real-world credit card data is hard to find, and it is impossible to script transaction history and demography data from any online open source. 
+To keep the analysis realistic, we found a dataset contains information on default payments, demographic factors, credit data, history of payment, and bill statements of credit card clients in Taiwan from April 2005 to September 2005. 
+
+The original dataset can be found [here](https://archive.ics.uci.edu/ml/datasets/default+of+credit+card+clients) at the UCI Machine Learning Repository. (Reference: Lichman, M. (2013). UCI Machine Learning Repository [http://archive.ics.uci.edu/ml]. Irvine, CA: University of California, School of Information and Computer Science.)
+
+
+**Data Description**
+
+There are 25 variables in tha dataset. Our goal is to predict whether the customer will default next month. So the target variable is  *"default.payment.next.month"*, where 1 = will default next month, and 0 = won't default next month.
+
+There are 24 predictors:
+
+•	ID: ID of each client
+
+•	LIMIT_BAL: Amount of given credit in NT dollars (includes individual and family/supplementary credit
+
+•	SEX: Gender (1=male, 2=female)
+
+•	EDUCATION: (1=graduate school, 2=university, 3=high school, 4=others, 5=unknown, 6=unknown)
+
+•	MARRIAGE: Marital status (1=married, 2=single, 3=divorce, 0=others)
+
+•	AGE: Age in years
+
+•	PAY_0: Repayment status in September, 2005 (-2: No consumption; -1: Paid in full; 0: The use of revolving credit; 1 = payment delay for one month;2 = payment delay for two months; . . .; 8 = payment delay for eight months and above)
+
+•	PAY_2: Repayment status in August, 2005 (scale same as above)
+
+•	...
+
+•	PAY_6: Repayment status in April, 2005 (scale same as above)
+
+•	BILL_AMT1: Amount of bill statement in September, 2005 (NT dollar)
+
+•	BILL_AMT2: Amount of bill statement in August, 2005 (NT dollar)
+
+•	...
+
+•	BILL_AMT6: Amount of bill statement in April, 2005 (NT dollar)
+
+•	PAY_AMT1: Amount of previous payment in September, 2005 (NT dollar)
+
+•	...
+
+•	PAY_AMT6: Amount of previous payment in April, 2005 (NT dollar)
+
+
+
+##Data Cleaning
+
+```{r, echo=FALSE}
+data <- read.csv('UCI_Credit_Card.csv')
+```
+
+
+**Drop NAs**
+
+There are ~20 instances contain NA in some columns. Since we have a relatively large database(~30k rows), then droping 20 rows won't affect the model performance. So we decide to drop the rows contain NA.
+```{r, echo=TRUE}
+data <- na.omit(data)
+```
+
+**Rename**
+
+To make variable names easy to interpret, we rename each column. 
+```{r, echo=TRUE}
+data <- plyr::rename(data, c('ID' = 'id','LIMIT_BAL' = 'limit_balance',
+                              'SEX' = 'sex', 'EDUCATION' = 'edu', 
+                             'MARRIAGE' ='marriage','AGE' = 'age',
+                             'PAY_0' = 'pay.9','PAY_2' = 'pay.8',
+                             'PAY_3' = 'pay.7','PAY_4' = 'pay.6',
+                             'PAY_5' = 'pay.5', 'PAY_6' = 'pay.4', 
+                             'default.payment.next.month' = 'default'))
+data <- plyr::rename(data, c('BILL_AMT1' = 'bill.amt.9', 'BILL_AMT2' = 'bill.amt.8',
+                             'BILL_AMT3' = 'bill.amt.7','BILL_AMT4' = 'bill.amt.6',
+                             'BILL_AMT5' = 'bill.amt.5','BILL_AMT6' = 'bill.amt.4'))
+data <- plyr::rename(data, c('PAY_AMT1' = 'pay.amt.9', 'PAY_AMT2' = 'pay.amt.8',
+                             'PAY_AMT3' = 'pay.amt.7','PAY_AMT4' = 'pay.amt.6',
+                             'PAY_AMT5' = 'pay.amt.5','PAY_AMT6' = 'pay.amt.4'))
+
+```
+
+**Clean Data of Education Level**
+
+According to the dictionary:
+Education: 1 = graduate school; 2 = university; 3 = high school; 0, 4, 5, 6 = others.
+Since we do not know the difference among 0,4,5,6 and regression model will treate the variable "edu"(education level) monotonic, then we assign 4 to education level if original education level = others.
+```{r, echo=TRUE}
+data$edu[data$edu == 0] <- 4
+data$edu[data$edu == 5] <- 4
+data$edu[data$edu == 6] <- 4
+
+
+```
+
+**Convert numberic to factor**
+
+Variables 'edu'(education level) and 'marriage' (Marital status) needs to change from numerical to factors.
+
+```{r}
+data$edu <- as.factor(data$edu)
+data$sex <- as.factor(data$sex)
+data$marriage <- as.factor(data$marriage)
+```
+
+**Make a Balanced Dataset **
+
+Our target variable (default) are not balanced. There are 23364 0s and only 6636 1s. Unblanced data affects generalizability of results and potentially the identifiability of model parameters. 
+
+Thus, we keep all 1s and randomly select the same amount of 0s to build a balanced dataset.
+```{r, include=FALSE}
+table(data$default) 
+data_0 <- data%>%filter(default == 0)
+data_1 <- data %>% filter(default == 1)
+data_0 <- dplyr::sample_n(data_0, 6636)
+data_balance <- rbind(data_0, data_1)
+```
+```{r, echo=TRUE}
+table(data_balance$default)
+```
+
+**Summary of cleaned data **
+
+Here's the sample data after cleaning
+```{r, echo=TRUE}
+sample_n(data_balance, 3)
+```
+
+**Train Test Split**
+
+We take 75% of the data for training and the rest 25% data for testing. 
+Due to the computational constraint, we do not use k-fold to do the cross-validation. 
+```{r, include=FALSE}
+# then we need to split to train 75% and test set 25% by random choice. 
+#train <- data_balance %>% dplyr::sample_frac(.75)
+#test  <- dplyr::anti_join(data_balance, train, by = 'id')
+
+## 75% of the sample size
+smp_size <- floor(0.75 * nrow(data_balance))
+
+## set the seed to make your partition reproducible
+set.seed(321)
+train_ind <- sample(seq_len(nrow(data_balance)), size = smp_size)
+
+train <- data_balance[train_ind, ]
+test <- data_balance[-train_ind, ]
+```
+
+
+
+
+
+
+## Models and Plots
+
+**Baseline Model**
+
+We use simple logistic regression without any payment information, i.e. our only variables are 'limit_balance', 'sex', 'edu', 'age'.
+```{r, include=FALSE}
+train.base <- train
+test.base <- test #copy train test set for different models
+```
+
+```{r, echo=TRUE}
+model.base <- glm(default ~limit_balance + sex + edu + age,data=train.base,family=binomial)
+```
+
+```{r, echo=FALSE}
+coef(model.base)
+
+#compute AUC using ROCR package
+prob.base <- model.base %>% predict(test.base, type = "response")
+prediction.base <- prediction(prob.base, test.base$default)
+performance.base <- performance(prediction.base, "auc")
+plt.base <- performance(prediction.base, "tpr", "fpr")
+cat('the auc score of baseline model is ', 100*performance.base@y.values[[1]], "\n") 
+
+#plot(plt.base, main="ROC Plot baseline")
+#legend('bottomright', title = 'base auc = ', legend = 100*performance.base@y.values[[1]])
+#plot.new
+```
+
+
+**K-Nearest-Neighbor**
+
+We first use knn (k = 10) to predict the target. However, the result of KNN is even lower than the baseline model. 
+```{r, include=FALSE}
+train.knn <- train
+test.knn <- test
+```
+```{r}
+model.knn <- knn(train = train.knn[,-25], test = test.knn[,-25],cl =train.knn[,25], k= 10)
+```
+```{r, echo=FALSE}
+pred.knn <- as.numeric(model.knn)
+pred.knn <- pred.knn-1
+prediction.knn <- prediction(pred.knn, test.knn$default)
+performance.knn <- performance(prediction.knn, "auc")
+#plt.knn <- performance(prediction.knn, "tpr", "fpr")
+cat('the auc score of knn is', 100*performance.knn@y.values[[1]])
+```
+
+
+
+**Logistic Regression (with Ridge Regulation)**
+
+First we use all 24 features to build the LR model and see how it works. Then, we use ridge and lasso regulation to imporve the model. 
+
+```{r, include=FALSE}
+train_lr <- train
+test_lr <- test #copy train test set for different models
+```
+
+```{r, echo=TRUE}
+model_lr <- glm(default ~.-id ,data=train_lr,family=binomial)
+```
+
+```{r, echo=FALSE}
+
+#compute AUC using ROCR package
+prob_lr <- model_lr %>% predict(test_lr, type = "response")
+prediction_lr <- prediction(prob_lr, test_lr$default)
+performance_lr <- performance(prediction_lr, "auc")
+plt_lr <- performance(prediction_lr, "tpr", "fpr")
+cat('the auc score of logistic regression model is ', 100*performance_lr@y.values[[1]], "\n") 
+
+#plot(plt_lr, main="ROC Plot")
+#legend('bottomright', title = 'log auc = ', legend = 100*performance_lr@y.values[[1]])
+#plot.new
+```
+
+```{r, include=FALSE}
+# Set up model matrix for glmnet
+X = model.matrix(default ~ .-id, train_lr)[, 1:24]
+y = train_lr$default
+
+X_test = model.matrix(default ~ .-id, test_lr)[, 1:24]
+y_test = test_lr$default
+```
+
+```{r}
+ridge.model = glmnet(X, y, family = 'binomial',alpha = 0,lambda = 0.01)
+lasso.model = glmnet(X, y, family = 'binomial',alpha = 1,lambda =0.01)
+```
+
+
+```{r, echo=FALSE}
+# Make Predictions on test dataset
+ridge.prob <- predict(ridge.model,newx = X_test,type ="response")
+lasso.prob <- predict(lasso.model,newx = X_test,type ="response")
+
+ridge.pred <- prediction(ridge.prob, y_test)
+lasso.pred <-prediction(lasso.prob,y_test)
+
+# Calculate AUC
+test.perf.ridge <- performance(ridge.pred, "auc")
+cat('the auc score of logistic regression model (after ridge regulatoin) is ', 100*test.perf.ridge@y.values[[1]], "\n") 
+
+test.perf.lasso <- performance(lasso.pred, "auc")
+cat('the auc score of logistic regression model (after lasso regulatoin) is ', 100*test.perf.lasso@y.values[[1]], "\n") 
+```
+
+
+
+**Logistic Regression after backward stepwise selection**
+
+We can see from the logisitic regression that some coeffecient are not significant. We do a feature selection to pick the most useful feature to rebuild the logistic regression model.
+
+Here, we use backward stepwise selection.
+```{r, echo=TRUE, warning=FALSE}
+model_lr.step <- model_lr %>% stepAIC(trace = FALSE)
+```
+
+```{r, echo=FALSE}
+summary(model_lr.step)
+#AUC for stepwise model_lr
+prob_lr.step <- model_lr.step %>% predict(test_lr, type = "response")
+prediction_lr.step <- prediction(prob_lr.step, test_lr$default)
+performance_lr.step <- performance(prediction_lr.step, "auc")
+plt_lr.step <- performance(prediction_lr, "tpr", "fpr")
+cat('the auc score after stepwise selection is ', 100*performance_lr.step@y.values[[1]], "\n")
+
+#plot(plt_lr.step, main="ROC Plot")
+#legend('bottomright', title = 'stepwise log auc = ', legend = 100*performance_lr.step@y.values[[1]])
+```
+
+
+
+**Random Forest**
+
+Random forest is one of the most accurate learning algorithms available. For many data sets, it produces a highly accurate classifier. So we use random forest with ntree = 1000 on the model. 
+
+```{r, include=FALSE}
+train.rf <- train
+test.rf <- test
+```
+
+```{r, echo=TRUE, warning=FALSE}
+model.rf <- randomForest(default ~.-id, data = train.rf, ntree = 1000,importance = TRUE)
+```
+
+```{r, echo=FALSE}
+#compute AUC
+prob.rf <- model.rf %>% predict(test.rf, type = "response")
+prediction.rf <- prediction(prob.rf, test.rf$default)
+performance.rf <- performance(prediction.rf, "auc")
+plt.rf <- performance(prediction.rf, "tpr", "fpr")
+cat('the auc score of random forest model is ', 100*performance.rf@y.values[[1]], "\n") 
+
+```
+
+
+
+
+##AUC Plots for selected models
+
+We compare all auc scores and plot ROC curves for selected model. Using logistic regression and random forest, the model performance is significantly better than the baseline model. 
+
+```{r, echo=FALSE}
+cat('the auc score of baseline model is ', 100*performance.base@y.values[[1]], "\n") 
+
+cat('the auc score of knn is', 100*performance.knn@y.values[[1]])
+
+cat('the auc score of logistic regression model is ', 100*performance_lr@y.values[[1]], "\n") 
+
+cat('the auc score of logistic regression model (after ridge regulation) is ', 100*test.perf.ridge@y.values[[1]], "\n") 
+
+cat('the auc score of logistic regression model (after lasso regulation) is ', 100*test.perf.lasso@y.values[[1]], "\n") 
+
+cat('the auc score after stepwise selection is ', 100*performance_lr.step@y.values[[1]], "\n")
+
+cat('the auc score of random forest model is ', 100*performance.rf@y.values[[1]], "\n") 
+```
+
+```{r, echo=FALSE}
+par(mfrow=c(2,2))
+plot(plt.base,type="l", main = 'baseline')
+plot(plt_lr,type="l", main = 'logistic regression')
+plot(plt_lr.step,type="l", main = 'logistic regression with stepwise selection')
+plot(plt.rf,type="l", main = 'random forest')
+```
+
+
+## Model extension
+
+**Predict use 5 months or less data**
+
+Looking at the dataset, we want to test out our model performance if we just use the data of the first k (k < 6) months to predict the next month payment. 
+i.e. In the original data set, we use April 2005 to September 2005 (6 months total) data to predit payment default rate in October 2005. We now want to use data from April 2005 to August 2005 (5 months total) to predict September's payment. 
+
+Thus, we create a new target variable call 'default_5' (which means default or not using 5 months data) by using the given payment data on September. The new data looks like this:
+```{r, include=FALSE}
+data.5m <- data
+data.5m$default_5 <- as.numeric(data.5m$pay.9 > 0)
+data.5m <- data.5m%>% select(c(-pay.9, -pay.amt.9, -bill.amt.9,-default))
+
+data_00 <- data.5m%>%filter(default_5 == 0)
+data_10 <- data.5m %>% filter(default_5 == 1)
+data_00 <- dplyr::sample_n(data_00, 6818)
+
+data_balance.5m <- rbind(data_00, data_10)
+
+
+train.5m <- data_balance.5m[train_ind, ]
+test.5m <- data_balance.5m[-train_ind, ]
+
+```
+
+```{r, echo=TRUE}
+sample_n(data_balance.5m, 3)
+```
+
+
+Then we apply the same logistic regression model on the new data set, and plot the ROC curve for both 6 months and 5 months models. The auc score is close, and the ROC curve of the 5 months data has a sharp elbow when false positive rate is around 0.1. We can conclude from the graph that prediction using 5 months data is as good as using 6 months data.  
+
+```{r, echo=FALSE}
+
+model_lr.5m<- glm(default_5 ~.-id ,data=train.5m,family=binomial)
+#summary(model_lr)
+
+#compute AUC using ROCR package
+prob_lr5 <- model_lr.5m %>% predict(test.5m, type = "response")
+prediction_lr5 <- prediction(prob_lr5, test.5m$default)
+performance_lr5 <- performance(prediction_lr5, "auc")
+plt_lr.5m <- performance(prediction_lr5, "tpr", "fpr")
+cat('the auc score of 5 months model is ', 100*performance_lr5@y.values[[1]], "\n")
+cat('the auc score of 5 months model is ', 100*performance_lr@y.values[[1]], "\n") 
+par(mfrow=c(2,2))
+plot(plt_lr, col = 'red', main = '6 months')
+plot(plt_lr.5m, col = 'blue', main = '5 months')
+```
+
+
+## Conclusion and Future Work
+
+Random forest has much higher AUC score than other models. Thus, we choose random forest as our final models. However, while making decisions for the new credit card application, regulators require financial institutions to provide reasons to customers when taking “adverse action”, i.e. turning down a credit card application. Some possibilities include “The proportion of your revolving balances to total balances is too high” or “you recently inquired a new loan.” 
+
+Currently, the black box models such as random forest are neither interpretable nor explainable. In settings where regulators or consumers demand explanations, more sophisticated machine learning techniques are needed. The techniques should offer both the promise of increased accuracy and explainability at the same time. 
+
+
+
+
+
+
+
